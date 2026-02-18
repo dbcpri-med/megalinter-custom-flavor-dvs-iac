@@ -1,0 +1,9 @@
+# MegaLinter Custom Flavor configuration
+# If you update it manually, run `npx mega-linter-runner --custom-flavor-setup` to propagate updates.
+
+label: DVS IaC
+linters:
+  - BASH_SHELLCHECK
+  - REPOSITORY_CHECKOV
+  - TERRAFORM_TERRAFORM_FMT
+  - TERRAFORM_TFLINT
