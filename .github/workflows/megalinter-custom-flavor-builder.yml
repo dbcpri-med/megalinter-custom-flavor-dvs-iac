@@ -106,13 +106,15 @@ jobs:
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
         continue-on-error: true
 
+      # Build the image locally only - do not push the intermediate image.
+      # The patch step below applies the setuptools fix and does the single push.
       - name: Build MegaLinter Custom Flavor
         uses: oxsecurity/megalinter/flavors/custom-builder@main
         with:
           megalinter-custom-flavor-builder-tag: ${{ steps.determine-tag.outputs.tag }}
           is-latest: ${{ steps.determine-tag.outputs.is-latest }}
-          upload-to-ghcr: "true"
-          upload-to-dockerhub: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_PASSWORD != '' && 'true' || 'false' }}
+          upload-to-ghcr: "false"
+          upload-to-dockerhub: "false"
           dockerhub-repo: ${{ vars.DOCKERHUB_REPO }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -122,13 +124,15 @@ jobs:
 
       # Workaround for pkg_resources missing in Python 3.13 (azure-devops SDK dependency).
       # The upstream fix is oxsecurity/megalinter#7151 (merged 2026-02-16) but not yet
-      # in a released image. Layer setuptools on top of the built image.
+      # in a released image. Layer setuptools on top of the locally built image,
+      # then do the single push to GHCR (and optionally Docker Hub).
       # TODO: Remove this step once MegaLinter releases a version with the fix.
-      - name: Patch image - install setuptools for Python 3.13 compatibility
+      - name: Patch and push image
         run: |
           TAG="${{ steps.determine-tag.outputs.tag }}"
           IMAGE="ghcr.io/${{ github.repository }}/megalinter-custom-flavor:${TAG}"
 
+          # Apply patch on top of locally built image (no pull needed)
           printf 'FROM %s\nRUN pip install --no-cache-dir setuptools\n' "$IMAGE" \
             | docker build -t "$IMAGE" -
 
@@ -138,4 +142,11 @@ jobs:
             LATEST_IMAGE="ghcr.io/${{ github.repository }}/megalinter-custom-flavor:latest"
             docker tag "$IMAGE" "$LATEST_IMAGE"
             docker push "$LATEST_IMAGE"
+          fi
+
+          # Push to Docker Hub if credentials are available
+          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ] && [ -n "${{ vars.DOCKERHUB_REPO }}" ]; then
+            DH_IMAGE="docker.io/${{ vars.DOCKERHUB_REPO }}/${{ github.event.repository.name }}:${TAG}"
+            docker tag "$IMAGE" "$DH_IMAGE"
+            docker push "$DH_IMAGE"
           fi
