@@ -68,6 +68,9 @@ jobs:
           elif [ "${{ github.event_name }}" == "release" ]; then
             TAG="${{ github.event.release.tag_name }}"
             echo "Using release tag: $TAG"
+          elif [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ "${{ inputs.is-latest }}" == "true" ]; then
+            TAG="latest"
+            echo "Using latest tag (is-latest=true, no version specified): $TAG"
           else
             TAG="beta"
             echo "Using default tag: $TAG"
@@ -119,7 +122,7 @@ jobs:
 
       # Workaround for pkg_resources missing in Python 3.13 (azure-devops SDK dependency).
       # The upstream fix is oxsecurity/megalinter#7151 (merged 2026-02-16) but not yet
-      # in a released or current :beta image. Layer setuptools on top of the built image.
+      # in a released image. Layer setuptools on top of the built image.
       # TODO: Remove this step once MegaLinter releases a version with the fix.
       - name: Patch image - install setuptools for Python 3.13 compatibility
         run: |
@@ -131,7 +134,7 @@ jobs:
 
           docker push "$IMAGE"
 
-          if [ "${{ steps.determine-tag.outputs.is-latest }}" == "true" ]; then
+          if [ "${{ steps.determine-tag.outputs.is-latest }}" == "true" ] && [ "$TAG" != "latest" ]; then
             LATEST_IMAGE="ghcr.io/${{ github.repository }}/megalinter-custom-flavor:latest"
             docker tag "$IMAGE" "$LATEST_IMAGE"
             docker push "$LATEST_IMAGE"
