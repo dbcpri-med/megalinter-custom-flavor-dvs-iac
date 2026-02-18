@@ -6,8 +6,10 @@ outputs:
     description: "0 if no source file has been updated, 1 if source files has been updated"
 runs:
   using: "docker"
-  # You can manually update the Docker image version here, or use the latest tag
-  image: "docker://ghcr.io/dbcpri-med/megalinter-custom-flavor-dvs-iac/megalinter-custom-flavor:latest"
+  # Using :beta (MegaLinter main branch) as workaround for pkg_resources crash
+  # in v9.3.0 and earlier. Revert to :latest once MegaLinter v9.4.0 is released
+  # (fix: oxsecurity/megalinter#7151)
+  image: "docker://ghcr.io/dbcpri-med/megalinter-custom-flavor-dvs-iac/megalinter-custom-flavor:beta"
   args:
     - "-v"
     - "/var/run/docker.sock:/var/run/docker.sock:rw"
