@@ -106,15 +106,13 @@ jobs:
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
         continue-on-error: true
 
-      # Build the image locally only - do not push the intermediate image.
-      # The patch step below applies the setuptools fix and does the single push.
       - name: Build MegaLinter Custom Flavor
         uses: oxsecurity/megalinter/flavors/custom-builder@main
         with:
           megalinter-custom-flavor-builder-tag: ${{ steps.determine-tag.outputs.tag }}
           is-latest: ${{ steps.determine-tag.outputs.is-latest }}
-          upload-to-ghcr: "false"
-          upload-to-dockerhub: "false"
+          upload-to-ghcr: "true"
+          upload-to-dockerhub: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_PASSWORD != '' && 'true' || 'false' }}
           dockerhub-repo: ${{ vars.DOCKERHUB_REPO }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -124,15 +122,16 @@ jobs:
 
       # Workaround for pkg_resources missing in Python 3.13 (azure-devops SDK dependency).
       # The upstream fix is oxsecurity/megalinter#7151 (merged 2026-02-16) but not yet
-      # in a released image. Layer setuptools on top of the locally built image,
-      # then do the single push to GHCR (and optionally Docker Hub).
+      # in a released image. Pull the just-pushed image, layer setuptools on top,
+      # and push again to overwrite the tag.
       # TODO: Remove this step once MegaLinter releases a version with the fix.
-      - name: Patch and push image
+      - name: Patch image - install setuptools for Python 3.13 compatibility
         run: |
           TAG="${{ steps.determine-tag.outputs.tag }}"
           IMAGE="ghcr.io/${{ github.repository }}/megalinter-custom-flavor:${TAG}"
 
-          # Apply patch on top of locally built image (no pull needed)
+          docker pull "$IMAGE"
+
           printf 'FROM %s\nRUN pip install --no-cache-dir setuptools\n' "$IMAGE" \
             | docker build -t "$IMAGE" -
 
@@ -144,9 +143,25 @@ jobs:
             docker push "$LATEST_IMAGE"
           fi
 
-          # Push to Docker Hub if credentials are available
-          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ] && [ -n "${{ vars.DOCKERHUB_REPO }}" ]; then
-            DH_IMAGE="docker.io/${{ vars.DOCKERHUB_REPO }}/${{ github.event.repository.name }}:${TAG}"
-            docker tag "$IMAGE" "$DH_IMAGE"
-            docker push "$DH_IMAGE"
-          fi
+      # The two-step push (builder then patch) leaves an orphaned untagged SHA entry.
+      # Delete all untagged package versions to keep GHCR tidy.
+      - name: Delete untagged package versions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ORG="${{ github.repository_owner }}"
+          # Slash in package name must be URL-encoded
+          PACKAGE="${{ github.event.repository.name }}%2Fmegalinter-custom-flavor"
+
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/orgs/${ORG}/packages/container/${PACKAGE}/versions?per_page=100" \
+            --jq '.[] | select(.metadata.container.tags | length == 0) | .id' \
+          | while read -r version_id; do
+            echo "Deleting untagged version: ${version_id}"
+            gh api \
+              --method DELETE \
+              -H "Accept: application/vnd.github+json" \
+              "/orgs/${ORG}/packages/container/${PACKAGE}/versions/${version_id}"
+          done
+          echo "Cleanup complete"
