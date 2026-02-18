@@ -120,6 +120,33 @@ jobs:
           CUSTOM_FLAVOR_BUILD_REPO_URL: ${{ github.repositoryUrl }}
           CUSTOM_FLAVOR_BUILD_USER: ${{ github.actor }}
 
+      # Record the GHCR version ID of the image just pushed by the builder.
+      # The patch step below will overwrite the same tag with a new SHA, making
+      # this version an orphaned untagged entry. Capturing it now lets the cleanup
+      # step delete only this specific version rather than all untagged versions.
+      - name: Capture builder image version ID for cleanup
+        id: capture-builder-version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.determine-tag.outputs.tag }}"
+          ORG="${{ github.repository_owner }}"
+          PACKAGE="${{ github.event.repository.name }}%2Fmegalinter-custom-flavor"
+
+          BUILDER_VERSION_ID=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/orgs/${ORG}/packages/container/${PACKAGE}/versions?per_page=100" \
+            | jq -r --arg tag "$TAG" \
+              '[ .[] | select(.metadata.container.tags | contains([$tag])) | .id ] | first')
+
+          if [ -n "$BUILDER_VERSION_ID" ] && [ "$BUILDER_VERSION_ID" != "null" ]; then
+            echo "Captured builder version ID for cleanup: ${BUILDER_VERSION_ID}"
+            echo "builder_version_id=${BUILDER_VERSION_ID}" >> $GITHUB_OUTPUT
+          else
+            echo "No existing version found for tag '${TAG}' - may be first build or API delay"
+            echo "builder_version_id=" >> $GITHUB_OUTPUT
+          fi
+
       # Workaround for pkg_resources missing in Python 3.13 (azure-devops SDK dependency).
       # The upstream fix is oxsecurity/megalinter#7151 (merged 2026-02-16) but not yet
       # in a released image. Pull the just-pushed image, layer setuptools on top,
@@ -143,25 +170,47 @@ jobs:
             docker push "$LATEST_IMAGE"
           fi
 
-      # The two-step push (builder then patch) leaves an orphaned untagged SHA entry.
-      # Delete all untagged package versions to keep GHCR tidy.
-      - name: Delete untagged package versions
+      # The patch step overwrites the builder's tag with a new SHA, leaving the
+      # builder's original SHA as an orphaned untagged version in GHCR.
+      # Delete only that specific version (captured before patching) to keep GHCR
+      # tidy without risking deletion of unrelated untagged versions.
+      - name: Delete builder orphan from GHCR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          BUILDER_VERSION_ID="${{ steps.capture-builder-version.outputs.builder_version_id }}"
+          if [ -z "$BUILDER_VERSION_ID" ]; then
+            echo "No builder version ID captured - nothing to clean up"
+            exit 0
+          fi
+
           ORG="${{ github.repository_owner }}"
-          # Slash in package name must be URL-encoded
           PACKAGE="${{ github.event.repository.name }}%2Fmegalinter-custom-flavor"
 
-          gh api \
-            -H "Accept: application/vnd.github+json" \
-            "/orgs/${ORG}/packages/container/${PACKAGE}/versions?per_page=100" \
-            --jq '.[] | select(.metadata.container.tags | length == 0) | .id' \
-          | while read -r version_id; do
-            echo "Deleting untagged version: ${version_id}"
-            gh api \
-              --method DELETE \
+          # Wait for GHCR metadata to reflect the patch step's push before deleting.
+          # Once the version has no tags, it's safe to delete as an orphan.
+          MAX_WAIT=60
+          WAITED=0
+          while [ $WAITED -lt $MAX_WAIT ]; do
+            TAG_COUNT=$(gh api \
               -H "Accept: application/vnd.github+json" \
-              "/orgs/${ORG}/packages/container/${PACKAGE}/versions/${version_id}"
+              "/orgs/${ORG}/packages/container/${PACKAGE}/versions/${BUILDER_VERSION_ID}" \
+              | jq -r '.metadata.container.tags | length')
+
+            if [ "$TAG_COUNT" == "0" ]; then
+              echo "Builder version ${BUILDER_VERSION_ID} is now untagged - deleting orphan"
+              gh api --method DELETE \
+                -H "Accept: application/vnd.github+json" \
+                "/orgs/${ORG}/packages/container/${PACKAGE}/versions/${BUILDER_VERSION_ID}"
+              echo "Deleted builder orphan version ID: ${BUILDER_VERSION_ID}"
+              break
+            fi
+
+            echo "Version still has ${TAG_COUNT} tag(s) - waiting for GHCR metadata to propagate..."
+            sleep 5
+            WAITED=$((WAITED + 5))
           done
-          echo "Cleanup complete"
+
+          if [ $WAITED -ge $MAX_WAIT ]; then
+            echo "Warning: Builder version ${BUILDER_VERSION_ID} still has tags after ${MAX_WAIT}s - skipping delete to avoid data loss"
+          fi
