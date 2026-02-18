@@ -120,19 +120,22 @@ jobs:
           CUSTOM_FLAVOR_BUILD_REPO_URL: ${{ github.repositoryUrl }}
           CUSTOM_FLAVOR_BUILD_USER: ${{ github.actor }}
 
-      # Workaround for pkg_resources missing in Python 3.13 (azure-devops SDK dependency).
-      # The upstream fix is oxsecurity/megalinter#7151 (merged 2026-02-16) but not yet
-      # in a released image. Pull the just-pushed image, layer setuptools on top,
-      # and push again to overwrite the tag.
+      # Workaround: the base image ships setuptools 80+ which removed pkg_resources
+      # from its wheel. When MegaLinter runs in GitHub Actions (GITHUB_ACTIONS=true),
+      # it loads all reporters including AzureCommentReporter, which imports
+      # azure.devops, which imports pkg_resources - causing a crash.
+      # Fix: force-downgrade to setuptools<80 which still ships pkg_resources.
+      # The upstream fix is oxsecurity/megalinter#7151 (merged 2026-02-16) but not
+      # yet in a released image.
       # TODO: Remove this step once MegaLinter releases a version with the fix.
-      - name: Patch image - install setuptools for Python 3.13 compatibility
+      - name: Patch image - downgrade setuptools to restore pkg_resources
         run: |
           TAG="${{ steps.determine-tag.outputs.tag }}"
           IMAGE="ghcr.io/${{ github.repository }}/megalinter-custom-flavor:${TAG}"
 
           docker pull "$IMAGE"
 
-          printf 'FROM %s\nRUN pip install --no-cache-dir setuptools\n' "$IMAGE" \
+          printf 'FROM %s\nRUN pip install --no-cache-dir --force-reinstall "setuptools<80"\n' "$IMAGE" \
             | docker build -t "$IMAGE" -
 
           docker push "$IMAGE"
