@@ -116,3 +116,23 @@ jobs:
           CUSTOM_FLAVOR_BUILD_REPO: ${{ github.repository }}
           CUSTOM_FLAVOR_BUILD_REPO_URL: ${{ github.repositoryUrl }}
           CUSTOM_FLAVOR_BUILD_USER: ${{ github.actor }}
+
+      # Workaround for pkg_resources missing in Python 3.13 (azure-devops SDK dependency).
+      # The upstream fix is oxsecurity/megalinter#7151 (merged 2026-02-16) but not yet
+      # in a released or current :beta image. Layer setuptools on top of the built image.
+      # TODO: Remove this step once MegaLinter releases a version with the fix.
+      - name: Patch image - install setuptools for Python 3.13 compatibility
+        run: |
+          TAG="${{ steps.determine-tag.outputs.tag }}"
+          IMAGE="ghcr.io/${{ github.repository }}/megalinter-custom-flavor:${TAG}"
+
+          printf 'FROM %s\nRUN pip install --no-cache-dir setuptools\n' "$IMAGE" \
+            | docker build -t "$IMAGE" -
+
+          docker push "$IMAGE"
+
+          if [ "${{ steps.determine-tag.outputs.is-latest }}" == "true" ]; then
+            LATEST_IMAGE="ghcr.io/${{ github.repository }}/megalinter-custom-flavor:latest"
+            docker tag "$IMAGE" "$LATEST_IMAGE"
+            docker push "$LATEST_IMAGE"
+          fi
